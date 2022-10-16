@@ -1,13 +1,17 @@
-use libc::{socket, SOCK_RAW, wait};
+use libc::{socket, SOCK_RAW, wait, printf};
 use std::io;
 use serde::Serialize;
 use std::mem;
 use std::ptr;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
+use std::ffi::{CStr};
 
 const ETH_P_IP: i32 = 0x0800;
 const AF_PACKET: i32 = 0x0F;
+const PING_ERRMSG_LEN: usize = 256;
+const PING_TABLE_LEN: usize = 5381;
+
 
 static mut CMSG: cmsg = cmsg{
   cm: libc::cmsghdr{
@@ -27,15 +31,39 @@ static mut CMSG: cmsg = cmsg{
 };
 
 struct PingObj {
+  pub timeout: libc::c_double,
+  pub ttl: libc::c_int,
+  pub addr_family: libc::c_int,
+  pub data: *mut libc::c_char,
+  pub fd4: libc::c_int,
+  pub fd6: libc::c_int,
   pub src_addr: *mut libc::sockaddr,
   pub src_addr_len: libc::socklen_t,
+  pub device: *mut libc::c_char,
+  pub set_mark: libc::c_char,
+  pub mark: libc::c_int,
+  pub errmsg: [libc::c_char; PING_ERRMSG_LEN],
+  pub head: *mut libc::c_void, // pinghost_t *
+  pub table: [*mut libc::c_void; PING_TABLE_LEN], // pinghost_t * array
 }
 
 impl PingObj {
-  pub fn new(src_addr: *mut libc::sockaddr, src_addr_len: libc::socklen_t) -> Self {
+  pub fn new() -> Self {
     Self {
-      src_addr,
-      src_addr_len
+      timeout: 0.0,
+      ttl: -1,
+      addr_family: -1,
+      data: ptr::null_mut(),
+      fd4: -1,
+      fd6: -1,
+      src_addr: ptr::null_mut(),
+      src_addr_len: 0,
+      device: ptr::null_mut(),
+      set_mark: -1,
+      mark: -1,
+      errmsg: [0; PING_ERRMSG_LEN],
+      head: ptr::null_mut(),
+      table: [ptr::null_mut(); PING_TABLE_LEN]
     }
   }
 }
@@ -96,19 +124,30 @@ pub struct cmsg {
 
 enum PingObject {}
 
-#[link(name = "liboping")]
+#[link(name = "oping")]
 extern "C" {
   fn ping_construct() -> *mut PingObject;
   fn ping_destroy(obj: *mut PingObject);
 }
 
-
 pub fn main() {
-  let ping_object = unsafe {  ping_construct() };
-  if ping_object != ptr::null_mut() {
+  let raw = unsafe {  ping_construct() };
+  if raw == ptr::null_mut() {
     eprintln!("in main: failed to initilize ping object");
     return
   }
+  let ping_object: *mut PingObj = unsafe { mem::transmute(raw) };
+  unsafe {
+    println!("{}", (*ping_object).timeout);
+    println!("{}", (*ping_object).ttl);
+    println!("{}", (*ping_object).addr_family);
+    println!("{:?}", CStr::from_ptr((*ping_object).data ));
+    println!("{}", (*ping_object).fd4);
+    println!("{}", (*ping_object).fd6);
+  }
+
+  unsafe { ping_destroy(raw) }
+
   let sockaddr: *mut libc::sockaddr = unsafe { mem::transmute(libc::malloc(mem::size_of::<libc::sockaddr>())) };
   if sockaddr == ptr::null_mut() {
     eprintln!("in main: failed to allocate memory for sockaddr struct");
@@ -119,7 +158,7 @@ pub fn main() {
     (*sockaddr).sa_len = mem::size_of::<libc::sockaddr>() as u8;
   }
 
-  let ping_obj = PingObj::new(sockaddr, mem::size_of::<libc::sockaddr>() as libc::socklen_t);
+  let ping_obj = PingObj::new();
   let socket_fd = unsafe { setup_socket(&ping_obj) };
   if socket_fd == -1  {
     eprintln!("in main: failed to setup socket");
